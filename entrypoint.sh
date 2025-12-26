@@ -1,6 +1,5 @@
 #!/bin/sh
 set -eu
-# BusyBox ash 通常支持 pipefail；不支持也不影响
 set -o pipefail 2>/dev/null || true
 
 : "${AGENT_ENDPOINT:?AGENT_ENDPOINT is required}"
@@ -10,42 +9,36 @@ log() { echo "[INFO] $*"; }
 err() { echo "[ERROR] $*" >&2; }
 
 AGENT_PID=""
-NGINX_PID=""
+APP_PID=""
 
 cleanup() {
-  # 避免重复执行时出错
   set +e
-
   log "Stopping processes..."
-  [ -n "${NGINX_PID}" ] && kill -TERM "${NGINX_PID}" 2>/dev/null || true
+  [ -n "${APP_PID}" ] && kill -TERM "${APP_PID}" 2>/dev/null || true
   [ -n "${AGENT_PID}" ] && kill -TERM "${AGENT_PID}" 2>/dev/null || true
 
-  # 等待退出
-  [ -n "${NGINX_PID}" ] && wait "${NGINX_PID}" 2>/dev/null || true
+  [ -n "${APP_PID}" ] && wait "${APP_PID}" 2>/dev/null || true
   [ -n "${AGENT_PID}" ] && wait "${AGENT_PID}" 2>/dev/null || true
-
   log "Stopped."
 }
 
 trap cleanup INT TERM
 
 log "Starting komari-agent..."
-/usr/local/bin/komari-agent \
-  -e "${AGENT_ENDPOINT}" \
-  -t "${AGENT_TOKEN}" &
+/usr/local/bin/komari-agent -e "${AGENT_ENDPOINT}" -t "${AGENT_TOKEN}" &
 AGENT_PID=$!
 log "komari-agent started (pid=${AGENT_PID})"
 
-log "Starting nginx..."
-nginx -g "daemon off;" &
-NGINX_PID=$!
-log "nginx started (pid=${NGINX_PID})"
+log "Starting node app..."
+node index.js &
+APP_PID=$!
+log "node app started (pid=${APP_PID})"
 
-# 等待任一进程退出；BusyBox 的 wait 是否支持 -n 取决于版本，所以做兼容
-if wait -n "${AGENT_PID}" "${NGINX_PID}" 2>/dev/null; then
+# 任一进程退出就退出容器（更符合编排系统预期）
+if wait -n "${AGENT_PID}" "${APP_PID}" 2>/dev/null; then
   EXIT_CODE=$?
 else
-  # fallback：轮询
+  # BusyBox 兼容 fallback
   EXIT_CODE=0
   while :; do
     if ! kill -0 "${AGENT_PID}" 2>/dev/null; then
@@ -53,9 +46,9 @@ else
       EXIT_CODE=1
       break
     fi
-    if ! kill -0 "${NGINX_PID}" 2>/dev/null; then
-      err "nginx exited"
-      wait "${NGINX_PID}" || true
+    if ! kill -0 "${APP_PID}" 2>/dev/null; then
+      err "node app exited"
+      wait "${APP_PID}" || true
       EXIT_CODE=$?
       break
     fi
@@ -63,6 +56,5 @@ else
   done
 fi
 
-# 有一个先退出了，就关掉另一个并退出
 cleanup
 exit "${EXIT_CODE}"
